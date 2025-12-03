@@ -1,5 +1,6 @@
 import os
 import datetime
+import math
 import pytorch_lightning as pl
 import multiprocessing
 import torch
@@ -100,7 +101,7 @@ class SimpleBEVSegmentation(pl.LightningModule):
         self.seg_head = BevEncode(inC=128, outC=self.num_layers)
         
         # Loss and metrics
-        self.seg_loss = SegmentationLoss(alpha=0.5, beta=0.5)
+        self.seg_loss = SegmentationLoss()
         self.seg_metric = IntersectionOverUnion(self.num_layers)
         
         # Dataset
@@ -319,23 +320,22 @@ class SimpleBEVSegmentation(pl.LightningModule):
         steps_per_epoch = len(train_loader)
         num_epochs = self.trainer.max_epochs
         total_steps = steps_per_epoch * num_epochs
-        warmup_steps = int(0.05 * total_steps)
+        warmup_steps = int(0.1 * total_steps)
         
         # Scheduler (linear warmup + cosine decay)
         def lr_lambda(current_step):
             if current_step <= warmup_steps:
                 return float(current_step + 1) / float(warmup_steps)
             else:
-                decay_step = current_step - warmup_steps
-                decay_total = max(total_steps - warmup_steps, 1)
-                decay_ratio = (1.0 - decay_step / decay_total) ** 0.96
+                progress = (current_step - warmup_steps) / (total_steps - warmup_steps)
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
                 min_ratio = min_lr / base_lr
-                return max(decay_ratio, min_ratio)
-        
+                return max(cosine_decay, min_ratio)
+
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-        
+
         print(f"Training steps: {total_steps}, Warmup: {warmup_steps}, Steps per epoch: {steps_per_epoch}")
-        
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
