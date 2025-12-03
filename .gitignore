@@ -1,0 +1,8 @@
+*~
+__pycache__
+
+# IDE
+.vscode/
+
+# logs
+logs/

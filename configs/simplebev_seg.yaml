@@ -1,0 +1,66 @@
+model:
+  target: "train_nuscenes_lightning.SimpleBEVSegmentation"
+  params:
+    # Training configuration
+    data_config:
+      data_root: '/home/zc/vggt/data/nuscenes'
+      # version: 'v1.0-mini'  # Options: 'v1.0-trainval', 'v1.0-test', 'v1.0-mini'
+      # data_split_train: "mini_train"
+      # data_split_val: "mini_val"
+      # For full dataset, use:
+      version: 'v1.0-trainval'
+      data_split_train: "train"
+      data_split_val: "val"
+      
+      filter_invisible_vehicles: True
+      ignore_index: 255
+      num_workers: 1
+      batch_size: 8
+      sequence_length: 1
+      feature_dim: 22
+
+      # BEV settings (SimpleBEV default: 200x200, [-50,50]x[-50,50])
+      lift:
+        x_bound: [-50, 50, 0.5]   # Forward/backward range in meters [min, max, resolution]
+        y_bound: [-50, 50, 0.5]   # Left/right range in meters
+        z_bound: [-5, 5, 10]      # Up/down range in meters (Y dimension in SimpleBEV)
+        d_bound: [2, 50, 1]       # Depth range
+        gt_depth: False
+
+      # NuScenes image settings
+      image:
+        original_width: 1600
+        original_height: 900
+        resize_scale: 0.5         # SimpleBEV typically uses half resolution
+        final_dim: [448, 800]     # Final image dimension after resizing (must be divisible by 32)
+        top_crop: 0
+        names: ['CAM_FRONT_LEFT', 
+                'CAM_FRONT', 
+                'CAM_FRONT_RIGHT', 
+                'CAM_BACK_LEFT', 
+                'CAM_BACK', 
+                'CAM_BACK_RIGHT']
+        normalization: False      # SimpleBEV uses custom normalization
+
+      # Semantic segmentation settings (6 layers like VGGT)
+      semantic_seg:
+        hdmap:
+          layers: ['drivable_area',
+                  'lane_divider',
+                  'ped_crossing',
+                  'walkway',
+                  'stop_line',
+                  'carpark_area']
+
+    trainer_config:
+      seed: 125                    # Same as original SimpleBEV
+      lr: !!float 3e-4             # SimpleBEV default learning rate
+      min_lr: !!float 5e-6
+      weight_decay: !!float 1e-4
+      gpu_num: 1
+      precision: 16                # Mixed precision training
+      epochs: 50
+      logger_freq: 200
+      val_after_epoch: 0           # Start validation from epoch 0
+      resume_path: null
+      # resume_path: "./logs/12_02_10_30/best-ckpt-epoch=29-step=6150.ckpt"
