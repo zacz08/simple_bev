@@ -58,7 +58,7 @@ model:
       min_lr: !!float 5e-6
       weight_decay: !!float 1e-4
       gpu_num: 1
-      precision: 16                # Mixed precision training
+      precision: bf16-mixed                # Mixed precision training
       epochs: 50
       logger_freq: 200
       val_after_epoch: 0           # Start validation from epoch 0
