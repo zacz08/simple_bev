@@ -53,7 +53,7 @@ model:
                   'carpark_area']
 
     trainer_config:
-      seed: 125                    # Same as original SimpleBEV
+      seed: 42                    # Same as original SimpleBEV
       lr: !!float 3e-4             # SimpleBEV default learning rate
       min_lr: !!float 5e-6
       weight_decay: !!float 1e-4

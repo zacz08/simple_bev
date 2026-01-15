@@ -14,6 +14,21 @@ from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import ModelCheckpoint
 import csv
 
+# --- 强制修复开始 (Monkey Patch) ---
+# 1. 保存 PyTorch 原本的 load 函数
+_original_torch_load = torch.load
+
+# 2. 定义一个新的 load 函数，强制把 weights_only 设为 False
+def forced_unsafe_load(*args, **kwargs):
+    # 无论 PyTorch Lightning 传入什么，这里都强制改为 False
+    if 'weights_only' in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+
+# 3. 替换掉 torch.load，这样后续所有代码调用的都是我们修改过的版本
+torch.load = forced_unsafe_load
+# --- 强制修复结束 ---
+
 # Import SimpleBEV components
 from nets.segnet import Segnet
 import utils.vox
@@ -412,13 +427,6 @@ def main():
     
     # Create model
     model = SimpleBEVSegmentation(cfg)
-    
-    # Resume from checkpoint if specified
-    resume_path = cfg.model.params.trainer_config.resume_path
-    if resume_path is not None:
-        print(f"Resuming from checkpoint: {resume_path}")
-        checkpoint = torch.load(resume_path, map_location='cpu')
-        model.load_state_dict(checkpoint['state_dict'])
     
     # Setup logging
     now = datetime.datetime.now()
