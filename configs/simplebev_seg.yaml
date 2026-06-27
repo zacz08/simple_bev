@@ -46,11 +46,11 @@ model:
       semantic_seg:
         hdmap:
           layers: ['drivable_area',
-                  'lane_divider',
                   'ped_crossing',
                   'walkway',
                   'stop_line',
-                  'carpark_area']
+                  'carpark_area',
+                  'lane_divider']
 
     trainer_config:
       seed: 42                    # Same as original SimpleBEV
