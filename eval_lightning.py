@@ -390,11 +390,7 @@ def evaluate(checkpoint_path, config_path='./configs/simplebev_seg.yaml'):
 
 def predict(checkpoint_path, config_path='./configs/simplebev_seg.yaml'):
     """使用 trainer.predict() 保存预测结果，包含推理速度统计"""
-    import os
-    import torch
     import json
-    import sys
-    import time
     sys.path.append('/home/zc/vggt')
     from bev.metrics import IntersectionOverUnion
     from bev.logger import ImageLogger
@@ -548,7 +544,7 @@ if __name__ == '__main__':
                         help='Path to checkpoint file')
     parser.add_argument('--config', type=str, default=DEFAULT_CONFIG_PATH,
                         help='Path to config file')
-    parser.add_argument('--mode', type=str, default='evaluate', choices=['evaluate', 'predict'],
+    parser.add_argument('--mode', type=str, default='predict', choices=['evaluate', 'predict'],
                         help='Mode: evaluate or predict')
     parser.add_argument('--measure-speed', action='store_true',
                         help='Report Params, FLOPs, peak CUDA memory, latency, and FPS.')

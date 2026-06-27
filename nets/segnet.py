@@ -473,4 +473,3 @@ class Segnet(nn.Module):
         offset_e = out_dict['instance_offset']
 
         return raw_e, feat_e, seg_e, center_e, offset_e
-

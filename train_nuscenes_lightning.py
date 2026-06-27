@@ -1,5 +1,6 @@
 import os
 import datetime
+import json
 import math
 import pytorch_lightning as pl
 import multiprocessing
@@ -118,6 +119,9 @@ class SimpleBEVSegmentation(pl.LightningModule):
         # Loss and metrics
         self.seg_loss = SegmentationLoss()
         self.seg_metric = IntersectionOverUnion(self.num_layers)
+        self.predict_metric = IntersectionOverUnion(self.num_layers)
+        self.predict_batch_count = 0
+        self.predict_sample_count = 0
         
         # Dataset
         data_split = self.data_cfg['data_split_train']
@@ -208,13 +212,17 @@ class SimpleBEVSegmentation(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         loss, loss_dict = self.shared_step(batch, prefix='train')
+        batch_size = int(batch['image'].shape[0])
         
-        self.log_dict(loss_dict, prog_bar=True, logger=False, on_step=True, on_epoch=True, sync_dist=True)
-        self.log("global_step", self.global_step, prog_bar=True, logger=False, on_step=True, on_epoch=False)
+        self.log_dict(loss_dict, prog_bar=True, logger=False, on_step=True, on_epoch=True,
+                      sync_dist=True, batch_size=batch_size)
+        self.log("global_step", self.global_step, prog_bar=True, logger=False, on_step=True,
+                 on_epoch=False, batch_size=batch_size)
         
         if self.use_scheduler:
             lr = self.optimizers().param_groups[0]['lr']
-            self.log('lr_abs', lr, prog_bar=True, logger=False, on_step=True, on_epoch=False, sync_dist=True)
+            self.log('lr_abs', lr, prog_bar=True, logger=False, on_step=True, on_epoch=False,
+                     sync_dist=True, batch_size=batch_size)
         
         return loss
     
@@ -254,14 +262,17 @@ class SimpleBEVSegmentation(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         val_epoch = self.opt_cfg.get('val_after_epoch', 0)
+        batch_size = int(batch['image'].shape[0])
         
         if self.current_epoch < val_epoch:
             self.log("val/IoU", torch.tensor(float("nan"), device=self.device),
-                     prog_bar=True, logger=False, on_epoch=True, sync_dist=True)
+                     prog_bar=True, logger=False, on_epoch=True, sync_dist=True,
+                     batch_size=batch_size)
             return
         
         loss, loss_dict = self.shared_step(batch, prefix='val')
-        self.log_dict(loss_dict, prog_bar=True, logger=False, on_epoch=True, sync_dist=True)
+        self.log_dict(loss_dict, prog_bar=True, logger=False, on_epoch=True,
+                      sync_dist=True, batch_size=batch_size)
     
     def on_validation_start(self):
         """Clear cache before validation"""
@@ -274,14 +285,106 @@ class SimpleBEVSegmentation(pl.LightningModule):
             return
         
         score = self.seg_metric.compute()
-        iou = score.mean().item()
-        log_dict = {'val/IoU': iou}
-        self.log_dict(log_dict, prog_bar=True, logger=False, on_epoch=True, sync_dist=True)
+        mean_iou = score.mean()
+        self.log('val/IoU', mean_iou, prog_bar=True, logger=False,
+                 on_epoch=True, sync_dist=True)
+        for index, layer in enumerate(self.seg_layers):
+            self.log(f'val/IoU/{layer}', score[index], prog_bar=False,
+                     logger=False, on_epoch=True, sync_dist=True)
         
         # Reset metric
         self.seg_metric.reset()
         
         # Clear cache after validation
+        torch.cuda.empty_cache()
+
+    def on_predict_start(self):
+        self.predict_metric.reset()
+        self.predict_batch_count = 0
+        self.predict_sample_count = 0
+        torch.cuda.empty_cache()
+
+    @torch.no_grad()
+    def predict_step(self, batch, batch_idx):
+        images, intrinsics, cam0_T_camXs, bev_seg_gt = self.prepare_data_from_batch(batch)
+
+        images = images.to(self.device, non_blocking=True)
+        intrinsics = intrinsics.to(self.device, non_blocking=True)
+        cam0_T_camXs = cam0_T_camXs.to(self.device, non_blocking=True)
+        bev_seg_gt = bev_seg_gt.to(self.device, non_blocking=True)
+
+        seg_logits = self.forward(images, intrinsics, cam0_T_camXs)
+
+        pred_mask = torch.where(seg_logits > 0, 1, 0)
+        gt_mask = (bev_seg_gt + 1) / 2
+        self.predict_metric.update(pred_mask, gt_mask)
+        batch_size = int(images.shape[0])
+        self.predict_batch_count += 1
+        self.predict_sample_count += batch_size
+        return {'batch_size': batch_size}
+
+    def on_predict_epoch_end(self):
+        iou_scores = self.predict_metric.compute().detach().cpu()
+        threshold = getattr(self.predict_metric, 'threshold', 0.5)
+        mean_iou = iou_scores.mean().item()
+
+        summary_lines = [
+            "=" * 60,
+            "PREDICT RESULTS",
+            "=" * 60,
+        ]
+        for index, layer in enumerate(self.seg_layers):
+            summary_lines.append(f"IoU {layer}: {iou_scores[index].item():.5f}")
+        summary_lines.extend([
+            "-" * 60,
+            f"Mean IoU@{threshold:.2f}: {mean_iou:.5f}",
+            "=" * 60,
+        ])
+
+        total_batches = int(self.predict_batch_count)
+        total_samples = int(self.predict_sample_count)
+
+        trainer = self._attached_trainer()
+        # if trainer is None or trainer.is_global_zero:
+        summary_text = "\n".join(summary_lines)
+        print("\n" + summary_text + "\n")
+
+        log_root = self.log_dir if self.log_dir is not None else os.getcwd()
+        os.makedirs(log_root, exist_ok=True)
+        summary_path = os.path.join(log_root, "iou_summary_predict.txt")
+        with open(summary_path, "w", encoding="utf-8") as summary_file:
+            summary_file.write(summary_text + "\n")
+
+        scene_filter = self.data_cfg.get('scene_class_filter', None)
+        if OmegaConf.is_config(scene_filter):
+            scene_filter = OmegaConf.to_container(scene_filter, resolve=True)
+
+        metrics = {
+            'mean_iou': mean_iou,
+            'per_layer_iou': {
+                str(layer): iou_scores[index].item()
+                for index, layer in enumerate(self.seg_layers)
+            },
+            'threshold': threshold,
+            'total_samples': total_samples,
+            'total_batches': total_batches,
+            'batch_size': int(self.data_cfg['batch_size']),
+            'paths': {
+                'config': getattr(self, 'predict_config_path', None),
+                'checkpoint': getattr(self, 'predict_checkpoint_path', None),
+            },
+            'scene_filter': {
+                'scene_class_file': self.data_cfg.get('scene_class_file', None),
+                'scene_class_filter': scene_filter,
+            },
+        }
+        metrics_path = os.path.join(log_root, "simplebev_predict_metrics.json")
+        with open(metrics_path, "w", encoding="utf-8") as metrics_file:
+            json.dump(metrics, metrics_file, indent=2)
+        print(f"[Predict] IoU summary saved to {summary_path}")
+        print(f"[Predict] metrics saved to {metrics_path}")
+
+        self.predict_metric.reset()
         torch.cuda.empty_cache()
     
     def log_images(self, batch, split='val', **kwargs):
@@ -361,17 +464,24 @@ class SimpleBEVSegmentation(pl.LightningModule):
             }
         }
     
+    def _attached_trainer(self):
+        try:
+            return self.trainer
+        except RuntimeError:
+            return None
+
     def train_dataloader(self):
         dataset = nuScenesDatasetBEV(
             self.nusc, 'train', self.data_cfg,
             data_split=self.data_cfg['data_split_train']
         )
         
-        if self.trainer and self.trainer.world_size > 1:
+        trainer = self._attached_trainer()
+        if trainer and trainer.world_size > 1:
             sampler = DistributedSampler(
                 dataset,
-                num_replicas=self.trainer.world_size,
-                rank=self.trainer.global_rank,
+                num_replicas=trainer.world_size,
+                rank=trainer.global_rank,
                 shuffle=True
             )
             shuffle = False
@@ -387,18 +497,26 @@ class SimpleBEVSegmentation(pl.LightningModule):
             num_workers=self.data_cfg['num_workers'],
             persistent_workers=True if self.data_cfg['num_workers'] > 0 else False
         )
+
+    def _validation_scene_class_kwargs(self):
+        return {
+            'scene_class_file': self.data_cfg.get('scene_class_file', None),
+            'scene_class_filter': self.data_cfg.get('scene_class_filter', None),
+        }
     
     def val_dataloader(self):
         dataset = nuScenesDatasetBEV(
             self.nusc, 'val', self.data_cfg,
-            data_split=self.data_cfg['data_split_val']
+            data_split=self.data_cfg['data_split_val'],
+            **self._validation_scene_class_kwargs(),
         )
         
-        if self.trainer and self.trainer.world_size > 1:
+        trainer = self._attached_trainer()
+        if trainer and trainer.world_size > 1:
             sampler = DistributedSampler(
                 dataset,
-                num_replicas=self.trainer.world_size,
-                rank=self.trainer.global_rank,
+                num_replicas=trainer.world_size,
+                rank=trainer.global_rank,
                 shuffle=False
             )
         else:
@@ -412,6 +530,9 @@ class SimpleBEVSegmentation(pl.LightningModule):
             num_workers=self.data_cfg['num_workers'],
             persistent_workers=False
         )
+
+    def predict_dataloader(self):
+        return self.val_dataloader()
 
 
 def main():
